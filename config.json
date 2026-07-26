@@ -2,12 +2,12 @@
   "firebase": {
     "database_url": "https://rastreador-c229f-default-rtdb.firebaseio.com",
     "project_id": "rastreador-c229f",
-    "service_account_file": "service_account.json",
-    "client_email": "firebase-adminsdk-fbsvc@rastreador-c229f.iam.gserviceaccount.com"
+    "service_account_file": "service_account.json"
   },
   "tracker": {
     "update_interval_seconds": 5,
     "use_termux_api": true,
-    "mock_gps_fallback": true
+    "mock_gps_fallback": false,
+    "force_hardware_gps": true
   }
 }

@@ -7,99 +7,133 @@ from typing import Dict, Any, Tuple
 
 class LocationTracker:
     """
-    Módulo otimizado de rastreamento de localização para Termux (Android) e Desktop.
-    Tenta obter coordenadas GPS brutas de alta precisão usando 'gps' e 'network',
-    realizando geocodificação reversa detalhada (Rua, Número, Bairro, Cidade, CEP, Link Google Maps).
+    Módulo de alta precisão GPS para Termux (Android).
+    Força o uso exclusivo do GPS via hardware (Satélites) sem fallbacks fictícios por IP.
+    Obtém telemetria avançada: Latitude, Longitude, Altitude, Velocidade, Rumos e Precisão em Metros.
     """
-    def __init__(self, use_termux_api: bool = True, mock_fallback: bool = True):
+    def __init__(self, use_termux_api: bool = True, mock_fallback: bool = False):
         self.use_termux_api = use_termux_api
-        self.mock_fallback = mock_fallback
+        self.mock_fallback = mock_fallback  # Desativado por padrão para EVITAR locais genéricos como SP
         self.last_known_address_cache = {}
+        self.last_valid_location = None
 
-    def get_raw_gps(self) -> Tuple[float, float, float, str]:
+    def get_raw_gps(self) -> Dict[str, Any]:
         """
-        Tenta obter coordenadas GPS de alta precisão.
-        Testa primeiro o provedor 'gps' (satélite) e faz fallback inteligente para 'network' (Wi-Fi/Torres).
-        Retorna (latitude, longitude, precisao_metros, provedor_usado).
+        Obtém a localização via hardware GPS real do dispositivo Android (termux-location -p gps).
+        Retorna dicionário com latitude, longitude, precisão, altitude, velocidade e provedor.
         """
         if self.use_termux_api:
-            # 1ª Tentativa: GPS por Satélite (Termux API)
+            # 1ª Tentativa: GPS Hardware via Satélites (Precisão máxima)
             try:
                 result = subprocess.run(
                     ["termux-location", "-p", "gps", "-s", "once"],
                     capture_output=True,
                     text=True,
-                    timeout=5
+                    timeout=10
                 )
                 if result.returncode == 0 and result.stdout.strip():
                     data = json.loads(result.stdout)
                     lat = float(data.get("latitude", 0.0))
                     lng = float(data.get("longitude", 0.0))
                     acc = float(data.get("accuracy", 0.0))
+                    alt = float(data.get("altitude", 0.0))
+                    speed = float(data.get("speed", 0.0))
+                    bearing = float(data.get("bearing", 0.0))
+
                     if lat != 0.0 or lng != 0.0:
-                        return (lat, lng, acc, "gps")
+                        return {
+                            "latitude": lat,
+                            "longitude": lng,
+                            "accuracy": acc,
+                            "altitude": alt,
+                            "speed": speed,
+                            "bearing": bearing,
+                            "provider": "gps_hardware",
+                            "status": "fix_ok"
+                        }
             except Exception:
                 pass
 
-            # 2ª Tentativa: Provedor de Rede / Wi-Fi (Network - Instantâneo e preciso para locais cobertos)
+            # 2ª Tentativa (se GPS satélite estiver sem visibilidade temporária indoor): Provedor Network do Android
             try:
                 result = subprocess.run(
                     ["termux-location", "-p", "network", "-s", "once"],
                     capture_output=True,
                     text=True,
-                    timeout=5
+                    timeout=6
                 )
                 if result.returncode == 0 and result.stdout.strip():
                     data = json.loads(result.stdout)
                     lat = float(data.get("latitude", 0.0))
                     lng = float(data.get("longitude", 0.0))
                     acc = float(data.get("accuracy", 0.0))
+                    alt = float(data.get("altitude", 0.0))
+                    speed = float(data.get("speed", 0.0))
+
                     if lat != 0.0 or lng != 0.0:
-                        return (lat, lng, acc, "network")
+                        return {
+                            "latitude": lat,
+                            "longitude": lng,
+                            "accuracy": acc,
+                            "altitude": alt,
+                            "speed": speed,
+                            "bearing": 0.0,
+                            "provider": "network_triangulation",
+                            "status": "fix_ok"
+                        }
             except Exception:
                 pass
 
-            # 3ª Tentativa: Chamada genérica termux-location sem filtro
-            try:
-                result = subprocess.run(
-                    ["termux-location"],
-                    capture_output=True,
-                    text=True,
-                    timeout=4
-                )
-                if result.returncode == 0 and result.stdout.strip():
-                    data = json.loads(result.stdout)
-                    lat = float(data.get("latitude", 0.0))
-                    lng = float(data.get("longitude", 0.0))
-                    acc = float(data.get("accuracy", 0.0))
-                    if lat != 0.0 or lng != 0.0:
-                        return (lat, lng, acc, data.get("provider", "termux-default"))
-            except Exception:
-                pass
+        # Se houver uma localização válida anterior capturada pelo GPS físico, mantém ela em vez de inventar
+        if self.last_valid_location:
+            loc = dict(self.last_valid_location)
+            loc["status"] = "aguardando_novo_sinal"
+            return loc
 
+        # Se nenhuma localização real for capturada e o mock estiver explicitamente ativado para dev no PC
         if self.mock_fallback:
-            # Fallback via IP (Apenas se o GPS do celular não estiver disponível ou rodando no PC)
-            try:
-                res = requests.get("https://ipapi.co/json/", timeout=4).json()
-                lat = float(res.get("latitude", -23.5505))
-                lng = float(res.get("longitude", -46.6333))
-                return (lat, lng, 15.0, "ip-geolocation")
-            except Exception:
-                return (-23.550520, -46.633308, 10.0, "mock-fallback")
+            return {
+                "latitude": -23.550520,
+                "longitude": -46.633308,
+                "accuracy": 15.0,
+                "altitude": 760.0,
+                "speed": 0.0,
+                "bearing": 0.0,
+                "provider": "simulacao_pc",
+                "status": "mock"
+            }
 
-        return (0.0, 0.0, 0.0, "desconhecido")
+        return {
+            "latitude": 0.0,
+            "longitude": 0.0,
+            "accuracy": 0.0,
+            "altitude": 0.0,
+            "speed": 0.0,
+            "bearing": 0.0,
+            "provider": "sem_sinal_gps",
+            "status": "sem_fix"
+        }
 
     def reverse_geocode(self, lat: float, lng: float) -> Dict[str, str]:
         """
-        Converte coordenadas (lat, lng) no endereço exato com alta precisão (zoom=18).
-        Obtém Rua, Número, Bairro, Cidade, Estado e CEP via OpenStreetMap Nominatim.
+        Realiza geocodificação reversa de alta precisão (zoom=18).
         """
+        if lat == 0.0 and lng == 0.0:
+            return {
+                "street": "Aguardando Sinal de GPS",
+                "neighborhood": "Ative o GPS do celular",
+                "city": "Aguardando Fix",
+                "state": "--",
+                "postcode": "",
+                "full_address": "Sinal de GPS do dispositivo não capturado. Certifique-se de que a Localização/GPS do Android está ATIVADA."
+            }
+
         cache_key = f"{round(lat, 5)},{round(lng, 5)}"
         if cache_key in self.last_known_address_cache:
             return self.last_known_address_cache[cache_key]
 
         headers = {
-            "User-Agent": "TermuxRastreadorGPS/2.0 (contact@local.dev)"
+            "User-Agent": "TermuxRastreadorGPS/3.0 (hardware-gps)"
         }
         url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lng}&zoom=18&addressdetails=1"
 
@@ -109,7 +143,7 @@ class LocationTracker:
             "city": "Cidade não identificada",
             "state": "UF",
             "postcode": "",
-            "full_address": f"Lat: {lat}, Lng: {lng}"
+            "full_address": f"Lat: {lat:.7f}, Lng: {lng:.7f}"
         }
 
         try:
@@ -119,10 +153,9 @@ class LocationTracker:
                 addr = data.get("address", {})
 
                 house_num = addr.get("house_number", "")
-                road = addr.get("road") or addr.get("pedestrian") or addr.get("street") or addr.get("avenue") or addr.get("footway") or addr.get("path") or "Rua não identificada"
+                road = addr.get("road") or addr.get("pedestrian") or addr.get("street") or addr.get("avenue") or addr.get("footway") or "Rua não identificada"
                 
                 street_display = f"{road}, {house_num}" if house_num and road != "Rua não identificada" else road
-
                 neighborhood = addr.get("neighbourhood") or addr.get("suburb") or addr.get("quarter") or addr.get("residential") or "Bairro não identificado"
                 city = addr.get("city") or addr.get("town") or addr.get("municipality") or addr.get("village") or addr.get("county") or "Cidade não identificada"
                 state = addr.get("state") or addr.get("state_code") or ""
@@ -137,29 +170,36 @@ class LocationTracker:
                     "full_address": data.get("display_name", f"{street_display}, {neighborhood} - {city}")
                 }
                 self.last_known_address_cache[cache_key] = address_info
-        except Exception as e:
+        except Exception:
             pass
 
         return address_info
 
     def capture_location(self) -> Dict[str, Any]:
         """
-        Executa o fluxo completo:
-        1. Obtém GPS exato
-        2. Realiza a geocodificação reversa detalhada
-        3. Monta link direto do Google Maps e timestamp oficial
+        Executa o processo de leitura do GPS real e montagem dos dados de telemetria.
         """
-        lat, lng, acc, provider = self.get_raw_gps()
+        gps_data = self.get_raw_gps()
+        lat = gps_data["latitude"]
+        lng = gps_data["longitude"]
+
+        if lat != 0.0 and lng != 0.0:
+            self.last_valid_location = gps_data
+
         addr = self.reverse_geocode(lat, lng)
         
         now_str = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-        google_maps_url = f"https://www.google.com/maps?q={lat:.7f},{lng:.7f}"
+        google_maps_url = f"https://www.google.com/maps?q={lat:.7f},{lng:.7f}" if (lat != 0.0 or lng != 0.0) else ""
 
         return {
             "latitude": lat,
             "longitude": lng,
-            "accuracy": acc,
-            "provider": provider,
+            "accuracy": gps_data["accuracy"],
+            "altitude": gps_data["altitude"],
+            "speed": gps_data["speed"],
+            "bearing": gps_data["bearing"],
+            "provider": gps_data["provider"],
+            "status_fix": gps_data["status"],
             "street": addr["street"],
             "neighborhood": addr["neighborhood"],
             "city": addr["city"],
