@@ -8,7 +8,6 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.prompt import Prompt, Confirm
 from rich.live import Live
-from rich.layout import Layout
 from rich.text import Text
 
 from firebase_service import FirebaseService
@@ -24,9 +23,10 @@ class TermuxTrackerApp:
 
         self.db_url = fb_conf.get("database_url", "")
         self.api_key = fb_conf.get("api_key", "")
+        self.sa_file = fb_conf.get("service_account_file", "service_account.json")
         self.update_interval = tracker_conf.get("update_interval_seconds", 5)
 
-        self.firebase = FirebaseService(self.db_url, self.api_key)
+        self.firebase = FirebaseService(self.db_url, self.api_key, service_account_file=self.sa_file)
         self.tracker = LocationTracker(
             use_termux_api=tracker_conf.get("use_termux_api", True),
             mock_fallback=tracker_conf.get("mock_gps_fallback", True)
@@ -47,11 +47,10 @@ class TermuxTrackerApp:
             except Exception as e:
                 console.print(f"[bold red][!] Erro ao carregar config.json: {e}[/bold red]")
         
-        # Configuração padrão de contingência
         return {
             "firebase": {
-                "database_url": "https://SEU-PROJETO-default-rtdb.firebaseio.com",
-                "api_key": ""
+                "database_url": "https://rastreador-c229f-default-rtdb.firebaseio.com",
+                "service_account_file": "service_account.json"
             },
             "tracker": {
                 "update_interval_seconds": 5,
@@ -67,50 +66,34 @@ class TermuxTrackerApp:
         header_text = Text("RASTREADOR EM TEMPO REAL - TERMUX & FIREBASE", style="bold cyan")
         console.print(Panel(header_text, expand=False, border_style="cyan"))
 
-    def check_config_url(self):
-        if "SEU-PROJETO" in self.db_url or not self.db_url:
-            console.print("[bold yellow][!] ATENÇÃO: É necessário configurar a URL do Firebase no arquivo config.json![/bold yellow]")
-            db_input = Prompt.ask("[cyan]Digite a URL do seu Firebase Realtime Database[/cyan] (ex: https://meu-app-rtdb.firebaseio.com)")
-            if db_input:
-                self.db_url = db_input.strip()
-                self.firebase.database_url = self.db_url.rstrip("/")
-                self.config["firebase"]["database_url"] = self.db_url
-                config_path = os.path.join(os.path.dirname(__file__), "config.json")
-                with open(config_path, "w", encoding="utf-8") as f:
-                    json.dump(self.config, f, indent=2)
-                console.print("[bold green][✓] Configuração atualizada e salva com sucesso![/bold green]\n")
-
     def login_screen(self):
         self.clear_screen()
         self.show_header()
-        self.check_config_url()
 
-        # Garante a conta de admin caso o banco esteja limpo
         self.firebase.ensure_default_admin()
 
         console.print("[bold green]=== TELA DE LOGIN ===[/bold green]")
         username = Prompt.ask("[bold white]Usuário[/bold white]")
         password = Prompt.ask("[bold white]Senha[/bold white]", password=True)
 
-        user = self.firebase.login(username, password)
+        user_resp = self.firebase.login(username, password)
 
-        if isinstance(user, dict) and "error" in user:
-            console.print(f"[bold red][!] {user['error']}[/bold red]")
-            time.sleep(2)
+        if isinstance(user_resp, dict) and "error" in user_resp:
+            console.print(f"\n[bold red][!] {user_resp['error']}[/bold red]")
+            time.sleep(2.5)
             return False
 
-        if user:
-            self.current_user = user
-            console.print(f"\n[bold green][✓] Login realizado com sucesso! Bem-vindo(a), {user.get('name', username)}[/bold green]")
+        if isinstance(user_resp, dict) and "username" in user_resp:
+            self.current_user = user_resp
+            console.print(f"\n[bold green][✓] Login efetuado com sucesso! Bem-vindo(a), {user_resp.get('name', username)}[/bold green]")
             time.sleep(1.5)
             return True
         else:
-            console.print("[bold red][!] Usuário ou senha incorretos![/bold red]")
+            console.print("\n[bold red][!] Falha ao realizar login.[/bold red]")
             time.sleep(2)
             return False
 
     def tracking_worker(self):
-        """Thread em segundo plano que atualiza a localização no Firebase a cada 5 segundos."""
         username = self.current_user.get("username")
         name = self.current_user.get("name", username)
 
@@ -124,7 +107,6 @@ class TermuxTrackerApp:
                 self.last_captured_location = loc_data
                 self.firebase.update_location(username, loc_data)
 
-            # Aguarda o intervalo de 5 segundos em fatias pequenas para responder rápido ao comando de parar
             for _ in range(self.update_interval * 2):
                 if self.stop_tracking_event.is_set():
                     break
@@ -143,8 +125,7 @@ class TermuxTrackerApp:
         self.firebase.toggle_monitoring(username, new_status)
 
         if new_status:
-            console.print("[bold green][✓] Monitoramento ATIVADO! Capturando a cada 5 segundos...[/bold green]")
-            # Força primeira captura imediata
+            console.print("[bold green][✓] Monitoramento ATIVADO! Obtendo sinal de GPS...[/bold green]")
             loc = self.tracker.capture_location()
             loc["username"] = username
             loc["name"] = self.current_user.get("name", username)
@@ -165,31 +146,33 @@ class TermuxTrackerApp:
         self.show_header()
         username = self.current_user.get("username")
 
-        console.print("[bold green]=== MINHA LOCALIZAÇÃO EXATA ===[/bold green]\n")
+        console.print("[bold green]=== LOCALIZAÇÃO EXATA EM TEMPO REAL ===[/bold green]\n")
 
-        if not self.last_captured_location:
-            console.print("[yellow]Obtendo localização mais recente...[/yellow]")
+        with console.status("[bold yellow]Capturando localização com alta precisão GPS/Rede...[/bold yellow]", spinner="dots"):
             loc = self.tracker.capture_location()
             loc["username"] = username
             loc["name"] = self.current_user.get("name", username)
             loc["monitoring_active"] = self.tracking_active
             self.last_captured_location = loc
-
-        loc = self.last_captured_location
+            if self.tracking_active:
+                self.firebase.update_location(username, loc)
 
         grid = Table.grid(expand=True, padding=(0, 1))
         grid.add_column(style="bold cyan", justify="right")
         grid.add_column(style="bold white")
 
         grid.add_row("Status Monitoramento:", "[bold green]ATIVADO (5s)[/bold green]" if self.tracking_active else "[bold red]DESATIVADO[/bold red]")
-        grid.add_row("Rua / Logradouro:", loc.get("street", "N/A"))
+        grid.add_row("Provedor de Sinal:", f"[yellow]{loc.get('provider', 'N/A').upper()}[/yellow] (Precisão: {loc.get('accuracy', 0):.1f}m)")
+        grid.add_row("Rua / Número:", loc.get("street", "N/A"))
         grid.add_row("Bairro:", loc.get("neighborhood", "N/A"))
         grid.add_row("Cidade / Estado:", f"{loc.get('city', 'N/A')} - {loc.get('state', 'UF')}")
-        grid.add_row("Coordenadas (Lat, Lng):", f"{loc.get('latitude')}, {loc.get('longitude')}")
-        grid.add_row("Link Google Maps:", f"[link={loc.get('google_maps_url')}]{loc.get('google_maps_url')}[/link]")
+        if loc.get("postcode"):
+            grid.add_row("CEP:", loc.get("postcode"))
+        grid.add_row("Coordenadas Exatas:", f"{loc.get('latitude'):.7f}, {loc.get('longitude'):.7f}")
+        grid.add_row("Link Direto Google Maps:", f"[link={loc.get('google_maps_url')}]{loc.get('google_maps_url')}[/link]")
         grid.add_row("Última Atualização:", loc.get("last_updated", "Agora"))
 
-        panel = Panel(grid, title=f"Localização de {self.current_user.get('name', username)}", border_style="green" if self.tracking_active else "red")
+        panel = Panel(grid, title=f"Dispositivo de {self.current_user.get('name', username)}", border_style="green" if self.tracking_active else "red")
         console.print(panel)
         
         console.print("\n[dim]Pressione ENTER para voltar ao menu principal...[/dim]")
@@ -215,7 +198,7 @@ class TermuxTrackerApp:
                 table.add_column("Usuário", style="cyan")
                 table.add_column("Nome", style="bold white")
                 table.add_column("Função", style="magenta")
-                table.add_column("Status Monitoramento", style="green")
+                table.add_column("Monitoramento", style="green")
                 table.add_column("Conta Ativa", style="yellow")
 
                 for u in users:
@@ -227,14 +210,15 @@ class TermuxTrackerApp:
                 input("\nPressione ENTER para continuar...")
 
             elif choice == "2":
-                target_user = Prompt.ask("Digite o nome de usuário (username)")
+                target_user = Prompt.ask("Digite o nome de usuário (username)").strip().lower()
                 locations = self.firebase.get_all_locations()
-                user_loc = locations.get(target_user.strip().lower())
+                user_loc = locations.get(target_user)
 
                 if user_loc:
                     table = Table(title=f"Localização Atual: {target_user}")
                     table.add_column("Campo", style="cyan")
                     table.add_column("Valor", style="white")
+                    table.add_row("Provedor", user_loc.get("provider", "N/A"))
                     table.add_row("Rua", user_loc.get("street", "N/A"))
                     table.add_row("Bairro", user_loc.get("neighborhood", "N/A"))
                     table.add_row("Cidade", f"{user_loc.get('city')} - {user_loc.get('state')}")
@@ -267,8 +251,9 @@ class TermuxTrackerApp:
                     current_active = u_data.get("active", True)
                     new_active = not current_active
                     url = f"{self.firebase.database_url}/users/{target_user}.json"
+                    headers = self.firebase._get_headers()
                     import requests
-                    requests.patch(url, json={"active": new_active})
+                    requests.patch(url, json={"active": new_active}, headers=headers)
                     console.print(f"[bold green][✓] Conta '{target_user}' {'ativada' if new_active else 'desativada'} com sucesso![/bold green]")
                 else:
                     console.print("[red]Usuário não encontrado.[/red]")
