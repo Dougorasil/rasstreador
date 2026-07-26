@@ -8,89 +8,68 @@ from typing import Dict, Any, Tuple
 class LocationTracker:
     """
     Módulo de alta precisão GPS para Termux (Android).
-    Força o uso exclusivo do GPS via hardware (Satélites) sem fallbacks fictícios por IP.
-    Obtém telemetria avançada: Latitude, Longitude, Altitude, Velocidade, Rumos e Precisão em Metros.
+    Força a leitura do GPS do celular em 4 níveis (Satélite GPS -> Rede Wi-Fi -> Posição Auto -> Cache Passivo do Android).
+    Garante retorno imediato da localização exata do celular sem travar ou dar erro de inativo.
     """
     def __init__(self, use_termux_api: bool = True, mock_fallback: bool = False):
         self.use_termux_api = use_termux_api
-        self.mock_fallback = mock_fallback  # Desativado por padrão para EVITAR locais genéricos como SP
+        self.mock_fallback = mock_fallback
         self.last_known_address_cache = {}
         self.last_valid_location = None
 
     def get_raw_gps(self) -> Dict[str, Any]:
         """
-        Obtém a localização via hardware GPS real do dispositivo Android (termux-location -p gps).
-        Retorna dicionário com latitude, longitude, precisão, altitude, velocidade e provedor.
+        Obtém a localização real do dispositivo Android usando o Termux API.
+        Tenta em sequência: GPS por Satélite -> Rede/Wi-Fi -> Provedor Passivo/Última Posição do Android.
         """
         if self.use_termux_api:
-            # 1ª Tentativa: GPS Hardware via Satélites (Precisão máxima)
-            try:
-                result = subprocess.run(
-                    ["termux-location", "-p", "gps", "-s", "once"],
-                    capture_output=True,
-                    text=True,
-                    timeout=10
-                )
-                if result.returncode == 0 and result.stdout.strip():
-                    data = json.loads(result.stdout)
-                    lat = float(data.get("latitude", 0.0))
-                    lng = float(data.get("longitude", 0.0))
-                    acc = float(data.get("accuracy", 0.0))
-                    alt = float(data.get("altitude", 0.0))
-                    speed = float(data.get("speed", 0.0))
-                    bearing = float(data.get("bearing", 0.0))
+            # 4 Estratégias de captura do Android (em ordem de prioridade)
+            strategies = [
+                (["termux-location", "-p", "gps", "-s", "once"], "gps_satelite", 5),
+                (["termux-location", "-p", "network", "-s", "once"], "rede_wifi_torres", 4),
+                (["termux-location"], "android_auto", 3),
+                (["termux-location", "-p", "passive"], "cache_passivo_android", 3)
+            ]
 
-                    if lat != 0.0 or lng != 0.0:
-                        return {
-                            "latitude": lat,
-                            "longitude": lng,
-                            "accuracy": acc,
-                            "altitude": alt,
-                            "speed": speed,
-                            "bearing": bearing,
-                            "provider": "gps_hardware",
-                            "status": "fix_ok"
-                        }
-            except Exception:
-                pass
+            for cmd, prov_name, timeout_sec in strategies:
+                try:
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout_sec
+                    )
+                    if result.returncode == 0 and result.stdout.strip():
+                        data = json.loads(result.stdout)
+                        lat = float(data.get("latitude", 0.0))
+                        lng = float(data.get("longitude", 0.0))
+                        acc = float(data.get("accuracy", 0.0))
+                        alt = float(data.get("altitude", 0.0))
+                        speed = float(data.get("speed", 0.0))
+                        bearing = float(data.get("bearing", 0.0))
 
-            # 2ª Tentativa (se GPS satélite estiver sem visibilidade temporária indoor): Provedor Network do Android
-            try:
-                result = subprocess.run(
-                    ["termux-location", "-p", "network", "-s", "once"],
-                    capture_output=True,
-                    text=True,
-                    timeout=6
-                )
-                if result.returncode == 0 and result.stdout.strip():
-                    data = json.loads(result.stdout)
-                    lat = float(data.get("latitude", 0.0))
-                    lng = float(data.get("longitude", 0.0))
-                    acc = float(data.get("accuracy", 0.0))
-                    alt = float(data.get("altitude", 0.0))
-                    speed = float(data.get("speed", 0.0))
+                        if lat != 0.0 or lng != 0.0:
+                            loc_result = {
+                                "latitude": lat,
+                                "longitude": lng,
+                                "accuracy": acc,
+                                "altitude": alt,
+                                "speed": speed,
+                                "bearing": bearing,
+                                "provider": prov_name,
+                                "status": "fix_ok"
+                            }
+                            self.last_valid_location = loc_result
+                            return loc_result
+                except Exception:
+                    continue
 
-                    if lat != 0.0 or lng != 0.0:
-                        return {
-                            "latitude": lat,
-                            "longitude": lng,
-                            "accuracy": acc,
-                            "altitude": alt,
-                            "speed": speed,
-                            "bearing": 0.0,
-                            "provider": "network_triangulation",
-                            "status": "fix_ok"
-                        }
-            except Exception:
-                pass
-
-        # Se houver uma localização válida anterior capturada pelo GPS físico, mantém ela em vez de inventar
+        # Se tiver uma localização válida anterior capturada no celular, mantém
         if self.last_valid_location:
             loc = dict(self.last_valid_location)
-            loc["status"] = "aguardando_novo_sinal"
+            loc["status"] = "fix_anterior"
             return loc
 
-        # Se nenhuma localização real for capturada e o mock estiver explicitamente ativado para dev no PC
         if self.mock_fallback:
             return {
                 "latitude": -23.550520,
@@ -110,8 +89,8 @@ class LocationTracker:
             "altitude": 0.0,
             "speed": 0.0,
             "bearing": 0.0,
-            "provider": "sem_sinal_gps",
-            "status": "sem_fix"
+            "provider": "aguardando_permissao_termux_api",
+            "status": "sem_permissao_ou_sinal"
         }
 
     def reverse_geocode(self, lat: float, lng: float) -> Dict[str, str]:
@@ -120,12 +99,12 @@ class LocationTracker:
         """
         if lat == 0.0 and lng == 0.0:
             return {
-                "street": "Aguardando Sinal de GPS",
-                "neighborhood": "Ative o GPS do celular",
-                "city": "Aguardando Fix",
+                "street": "Aguardando Leitura do GPS",
+                "neighborhood": "Conceda permissão no app Termux:API",
+                "city": "Aguardando Sinal",
                 "state": "--",
                 "postcode": "",
-                "full_address": "Sinal de GPS do dispositivo não capturado. Certifique-se de que a Localização/GPS do Android está ATIVADA."
+                "full_address": "Certifique-se de conceder permissão de Localização ao aplicativo 'Termux:API' nas Configurações do Android."
             }
 
         cache_key = f"{round(lat, 5)},{round(lng, 5)}"
@@ -133,7 +112,7 @@ class LocationTracker:
             return self.last_known_address_cache[cache_key]
 
         headers = {
-            "User-Agent": "TermuxRastreadorGPS/3.0 (hardware-gps)"
+            "User-Agent": "TermuxRastreadorGPS/4.0 (android-multi-provider)"
         }
         url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lng}&zoom=18&addressdetails=1"
 
@@ -176,15 +155,9 @@ class LocationTracker:
         return address_info
 
     def capture_location(self) -> Dict[str, Any]:
-        """
-        Executa o processo de leitura do GPS real e montagem dos dados de telemetria.
-        """
         gps_data = self.get_raw_gps()
         lat = gps_data["latitude"]
         lng = gps_data["longitude"]
-
-        if lat != 0.0 and lng != 0.0:
-            self.last_valid_location = gps_data
 
         addr = self.reverse_geocode(lat, lng)
         

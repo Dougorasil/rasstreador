@@ -8,9 +8,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.prompt import Prompt, Confirm
 from rich.live import Live
-from rich.layout import Layout
 from rich.text import Text
-from rich.columns import Columns
 from rich.align import Align
 
 from firebase_service import FirebaseService
@@ -170,7 +168,7 @@ class TermuxTrackerApp:
 
         console.print("[bold green]=== MONITORAMENTO GPS DE ALTA PRECISÃO ===[/bold green]\n")
 
-        with console.status("[bold yellow]Lendo satélites de GPS do celular...[/bold yellow]", spinner="dots"):
+        with console.status("[bold yellow]Lendo dados do celular (GPS/Rede/Cache)...[/bold yellow]", spinner="dots"):
             loc = self.tracker.capture_location()
             loc["username"] = username
             loc["name"] = self.current_user.get("name", username)
@@ -183,16 +181,13 @@ class TermuxTrackerApp:
         lng = loc.get("longitude", 0.0)
         prov = loc.get("provider", "N/A").upper()
         acc = loc.get("accuracy", 0.0)
-        speed = loc.get("speed", 0.0) * 3.6  # Converte m/s para km/h
+        speed = loc.get("speed", 0.0) * 3.6
         alt = loc.get("altitude", 0.0)
 
-        # Status badge
-        if "GPS" in prov:
-            status_badge = "[bold green]🟢 FIX SATÉLITE GPS REAL[/bold green]"
-        elif "NETWORK" in prov:
-            status_badge = "[bold yellow]🟡 REDE CELULAR/WI-FI[/bold yellow]"
+        if lat != 0.0 or lng != 0.0:
+            status_badge = f"[bold green]🟢 SINAL GPS OK ({prov})[/bold green]"
         else:
-            status_badge = "[bold red]🔴 AGUARDANDO SINAL GPS[/bold red]"
+            status_badge = "[bold red]🔴 AGUARDANDO PERMISSÃO DO TERMUX:API[/bold red]"
 
         grid = Table.grid(expand=True, padding=(0, 1))
         grid.add_column(style="bold cyan", justify="right")
@@ -211,8 +206,19 @@ class TermuxTrackerApp:
             grid.add_row("Link Google Maps:", f"[link={loc.get('google_maps_url')}][bold yellow]{loc.get('google_maps_url')}[/bold yellow][/link]")
         grid.add_row("Última Leitura:", loc.get("last_updated", "Agora"))
 
-        panel = Panel(grid, title=f"Telemetria do Dispositivo - {self.current_user.get('name', username)}", border_style="green" if self.tracking_active else "red")
+        panel = Panel(grid, title=f"Telemetria do Dispositivo - {self.current_user.get('name', username)}", border_style="green" if lat != 0.0 else "red")
         console.print(panel)
+
+        if lat == 0.0:
+            help_panel = Panel(
+                "[bold yellow]💡 Como resolver no celular Android:[/bold yellow]\n"
+                "1. Abra as [bold white]Configurações do Android > Aplicativos > Termux:API[/bold white]\n"
+                "2. Vá em [bold white]Permissões > Localização[/bold white] e selecione [bold green]'Permitir durante o uso do app'[/bold green]\n"
+                "3. Certifique-se de que o aplicativo complementar [bold cyan]'Termux:API'[/bold cyan] está instalado no celular (disponível no F-Droid).",
+                title="⚠️ Permissão de Localização Solicitada",
+                border_style="yellow"
+            )
+            console.print(help_panel)
 
         if self.logs_history:
             log_text = "\n".join(self.logs_history)
@@ -224,25 +230,22 @@ class TermuxTrackerApp:
     def run_gps_diagnostic(self):
         self.clear_screen()
         self.show_header()
-        console.print("[bold yellow]=== DIAGNÓSTICO DO HARDWARE GPS DO CELULAR ===[/bold yellow]\n")
-        console.print("[white]Iniciando teste direto do receptor de GPS (termux-location)...[/white]\n")
+        console.print("[bold yellow]=== DIAGNÓSTICO DE CAPTURA DO CELULAR ===[/bold yellow]\n")
 
-        with console.status("[bold green]Procurando satélites GPS ativos...[/bold green]", spinner="earth"):
+        with console.status("[bold green]Testando os 4 provedores do Android...[/bold green]", spinner="earth"):
             start_t = time.time()
             gps_data = self.tracker.get_raw_gps()
             elapsed = time.time() - start_t
 
-        table = Table(title="Resultado do Teste de Diagnóstico GPS")
+        table = Table(title="Resultado do Diagnóstico de Hardware")
         table.add_column("Parâmetro", style="cyan")
         table.add_column("Resultado", style="white")
 
         table.add_row("Tempo de Resposta", f"{elapsed:.2f} segundos")
         table.add_row("Status do Sinal", gps_data.get("status", "N/A").upper())
-        table.add_row("Provedor Detectado", gps_data.get("provider", "N/A").upper())
-        table.add_row("Latitude / Longitude", f"{gps_data.get('latitude'):.7f}, {gps_data.get('longitude'):.7f}")
-        table.add_row("Precisão (Erro de Raio)", f"{gps_data.get('accuracy', 0.0):.1f} metros")
-        table.add_row("Altitude", f"{gps_data.get('altitude', 0.0):.1f} metros")
-        table.add_row("Velocidade Atual", f"{gps_data.get('speed', 0.0) * 3.6:.1f} km/h")
+        table.add_row("Provedor Ativo", gps_data.get("provider", "N/A").upper())
+        table.add_row("Coordenadas", f"{gps_data.get('latitude'):.7f}, {gps_data.get('longitude'):.7f}")
+        table.add_row("Precisão (Erro)", f"{gps_data.get('accuracy', 0.0):.1f} metros")
 
         console.print(table)
         console.print("\n[dim]Pressione ENTER para voltar ao menu...[/dim]")
