@@ -36,7 +36,7 @@ class TermuxTrackerApp:
         self.current_user = None
         self.tracking_active = False
         self.wake_lock_active = False
-        self.daemon_process = None
+        self.shell_daemon_active = False
         self.tracking_thread = None
         self.stop_tracking_event = threading.Event()
         self.last_captured_location = None
@@ -63,20 +63,12 @@ class TermuxTrackerApp:
             }
         }
 
-    def save_config(self):
-        config_path = os.path.join(os.path.dirname(__file__), "config.json")
-        try:
-            with open(config_path, "w", encoding="utf-8") as f:
-                json.dump(self.config, f, indent=2)
-        except Exception:
-            pass
-
     def clear_screen(self):
         os.system("cls" if os.name == "nt" else "clear")
 
     def show_header(self):
         header_text = Text("🛰️ RASTREADOR GPS HARDWARE - TERMUX 24/7 DAEMON ⚡", style="bold cyan")
-        sub_header = Text("Monitoramento Contínuo em Segundo Plano • 5s", style="dim white")
+        sub_header = Text("Monitoramento em Tempo Real em Segundo Plano • 5s", style="dim white")
         content = Text.assemble(header_text, "\n", sub_header)
         console.print(Panel(Align.center(content), expand=True, border_style="cyan"))
 
@@ -98,7 +90,7 @@ class TermuxTrackerApp:
             subprocess.run([
                 "termux-notification",
                 "-t", "📍 Rastreamento GPS 24/7 Ativo",
-                "-c", f"Dispositivo {name} atualizando a cada 5s em segundo plano...",
+                "-c", f"Dispositivo {name} atualizando a cada 5s...",
                 "--priority", "high"
             ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             self.add_log("⚡ Wake-Lock & Notificação Android Ativados")
@@ -113,6 +105,46 @@ class TermuxTrackerApp:
             self.add_log("Wake-Lock liberado")
         except Exception:
             pass
+
+    def start_shell_daemon_247(self):
+        """Inicia o daemon Shell em segundo plano (background_tracker.sh)."""
+        username = self.current_user.get("username")
+        sh_script = os.path.join(os.path.dirname(__file__), "background_tracker.sh")
+
+        if os.path.exists(sh_script):
+            os.system(f"chmod +x '{sh_script}'")
+
+        try:
+            if os.name != "nt":
+                subprocess.Popen(["nohup", "bash", sh_script, username], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            else:
+                sh_py = os.path.join(os.path.dirname(__file__), "daemon_service.py")
+                subprocess.Popen([sys.executable, sh_py], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            self.tracking_active = True
+            self.shell_daemon_active = True
+            self.wake_lock_active = True
+            
+            console.print("\n[bold green][✓] Daemon 24/7 em Segundo Plano Iniciado com Sucesso![/bold green]")
+            console.print("[bold white]Você pode minimizar o Termux ou BLOQUEAR A TELA do celular. O rastreamento continuará gravando no Firebase a cada 5s sem interrupção.[/bold white]")
+            time.sleep(3)
+        except Exception as e:
+            console.print(f"[red]Erro ao iniciar daemon: {e}[/red]")
+            time.sleep(2)
+
+    def stop_shell_daemon_247(self):
+        try:
+            if os.name != "nt":
+                subprocess.run(["pkill", "-f", "background_tracker.sh"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+        self.tracking_active = False
+        self.shell_daemon_active = False
+        self.disable_android_wake_lock()
+        if self.current_user:
+            self.firebase.toggle_monitoring(self.current_user.get("username"), False)
+        console.print("\n[yellow][!] Serviço 24/7 Interrompido.[/yellow]")
+        time.sleep(1.5)
 
     def login_screen(self):
         self.clear_screen()
@@ -142,102 +174,6 @@ class TermuxTrackerApp:
             time.sleep(2)
             return False
 
-    def start_background_daemon_process(self):
-        """Inicia o processo desacoplado em segundo plano no Linux/Android."""
-        if self.current_user:
-            self.config["active_daemon_user"] = {
-                "username": self.current_user.get("username"),
-                "name": self.current_user.get("name")
-            }
-            self.save_config()
-
-        daemon_script = os.path.join(os.path.dirname(__file__), "daemon_service.py")
-        try:
-            if os.name == "nt":
-                self.daemon_process = subprocess.Popen([sys.executable, daemon_script])
-            else:
-                # No Termux/Linux, lança desacoplado
-                self.daemon_process = subprocess.Popen([sys.executable, daemon_script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-            self.tracking_active = True
-            self.wake_lock_active = True
-            console.print("\n[bold green][✓] Serviço Daemon em Segundo Plano Iniciado com Sucesso![/bold green]")
-            console.print("[dim]Pode fechar ou minimizar o aplicativo. O rastreamento continuará ativo 24/7.[/dim]")
-            time.sleep(2)
-        except Exception as e:
-            console.print(f"[red]Erro ao iniciar daemon: {e}[/red]")
-            time.sleep(2)
-
-    def stop_background_daemon_process(self):
-        if self.daemon_process:
-            try:
-                self.daemon_process.terminate()
-            except Exception:
-                pass
-            self.daemon_process = None
-        self.tracking_active = False
-        self.disable_android_wake_lock()
-        if self.current_user:
-            self.firebase.toggle_monitoring(self.current_user.get("username"), False)
-        console.print("\n[yellow][!] Serviço em Segundo Plano Interrompido.[/yellow]")
-        time.sleep(1.5)
-
-    def tracking_worker(self):
-        username = self.current_user.get("username")
-        name = self.current_user.get("name", username)
-
-        while not self.stop_tracking_event.is_set():
-            if self.tracking_active:
-                loc_data = self.tracker.capture_location()
-                loc_data["username"] = username
-                loc_data["name"] = name
-                loc_data["monitoring_active"] = True
-
-                self.last_captured_location = loc_data
-                ok = self.firebase.update_location(username, loc_data)
-                
-                prov = loc_data.get("provider", "gps").upper()
-                acc = loc_data.get("accuracy", 0.0)
-                if ok:
-                    self.add_log(f"🟢 GPS {prov} ({acc:.1f}m) -> Firebase OK")
-                else:
-                    self.add_log("🔴 Erro ao sincronizar com Firebase")
-
-            for _ in range(self.update_interval * 2):
-                if self.stop_tracking_event.is_set():
-                    break
-                time.sleep(0.5)
-
-    def start_background_tracker(self):
-        if self.tracking_thread is None or not self.tracking_thread.is_alive():
-            self.stop_tracking_event.clear()
-            self.tracking_thread = threading.Thread(target=self.tracking_worker, daemon=True)
-            self.tracking_thread.start()
-
-    def toggle_tracking(self):
-        username = self.current_user.get("username")
-        new_status = not self.tracking_active
-        self.tracking_active = new_status
-        self.firebase.toggle_monitoring(username, new_status)
-
-        if new_status:
-            self.enable_android_wake_lock()
-            console.print("\n[bold green][✓] Rastreamento GPS em Segundo Plano ATIVADO![/bold green]")
-            loc = self.tracker.capture_location()
-            loc["username"] = username
-            loc["name"] = self.current_user.get("name", username)
-            loc["monitoring_active"] = True
-            self.last_captured_location = loc
-            self.firebase.update_location(username, loc)
-        else:
-            self.disable_android_wake_lock()
-            console.print("\n[bold yellow][!] Rastreamento GPS DESATIVADO.[/bold yellow]")
-            loc_data = self.last_captured_location or {}
-            loc_data["monitoring_active"] = False
-            loc_data["username"] = username
-            self.firebase.update_location(username, loc_data)
-
-        time.sleep(1.8)
-
     def display_current_location_panel(self):
         self.clear_screen()
         self.show_header()
@@ -251,8 +187,6 @@ class TermuxTrackerApp:
             loc["name"] = self.current_user.get("name", username)
             loc["monitoring_active"] = self.tracking_active
             self.last_captured_location = loc
-            if self.tracking_active:
-                self.firebase.update_location(username, loc)
 
         lat = loc.get("latitude", 0.0)
         lng = loc.get("longitude", 0.0)
@@ -266,14 +200,14 @@ class TermuxTrackerApp:
         else:
             status_badge = "[bold red]🔴 AGUARDANDO PERMISSÃO DO TERMUX:API[/bold red]"
 
-        bg_badge = "[bold green]⚡ ATIVADO (Wake-Lock On)[/bold green]" if self.wake_lock_active else "[dim]DESATIVADO[/dim]"
+        bg_badge = "[bold green]⚡ DAEMON 24/7 ON (Tela Apagada OK)[/bold green]" if self.shell_daemon_active else "[dim]DESATIVADO[/dim]"
 
         grid = Table.grid(expand=True, padding=(0, 1))
         grid.add_column(style="bold cyan", justify="right")
         grid.add_column(style="bold white")
 
         grid.add_row("Status do GPS:", status_badge)
-        grid.add_row("Modo Segundo Plano:", bg_badge)
+        grid.add_row("Modo Segundo Plano 24/7:", bg_badge)
         grid.add_row("Provedor / Precisão:", f"[bold green]{prov}[/bold green] | Precisão: [bold yellow]{acc:.1f} metros[/bold yellow]")
         grid.add_row("Velocidade / Altitude:", f"[white]{speed:.1f} km/h[/white] | Altitude: [white]{alt:.1f} m[/white]")
         grid.add_row("Rua / Número:", loc.get("street", "N/A"))
@@ -288,10 +222,6 @@ class TermuxTrackerApp:
 
         panel = Panel(grid, title=f"Telemetria do Dispositivo - {self.current_user.get('name', username)}", border_style="green" if lat != 0.0 else "red")
         console.print(panel)
-
-        if self.logs_history:
-            log_text = "\n".join(self.logs_history)
-            console.print(Panel(log_text, title="📜 Histórico de Sincronizações (5s)", border_style="dim white"))
         
         console.print("\n[dim]Pressione ENTER para retornar ao menu principal...[/dim]")
         input()
@@ -306,8 +236,8 @@ class TermuxTrackerApp:
             "2. Clique em [bold white]Bateria[/bold white] (ou Uso de Bateria)\n"
             "3. Altere de 'Otimizado' para [bold green]'Sem Restrições' (Unrestricted)[/bold green]\n\n"
             "4. Repita o mesmo passo para o app [bold white]Termux:API[/bold white]\n"
-            "5. Ative a opção 1 do menu ('Iniciar Rastreamento em Segundo Plano Desacoplado').\n\n"
-            "[dim]Isso impede que a economia de energia do Android feche o Python ao bloquear a tela.[/dim]",
+            "5. Ative a opção 1 do menu ('Iniciar Rastreamento 24/7').\n\n"
+            "[dim]Isso garante que o celular NUNCA encerre o rastreamento ao bloquear a tela.[/dim]",
             title="🔋 Guia de Bateria do Android",
             border_style="cyan"
         )
@@ -320,7 +250,7 @@ class TermuxTrackerApp:
         self.show_header()
         console.print("[bold yellow]=== DIAGNÓSTICO DE CAPTURA DO CELULAR ===[/bold yellow]\n")
 
-        with console.status("[bold green]Testando hardware GPS e Wake-Lock...[/bold green]", spinner="earth"):
+        with console.status("[bold green]Testando hardware GPS e Daemon 24/7...[/bold green]", spinner="earth"):
             start_t = time.time()
             gps_data = self.tracker.get_raw_gps()
             elapsed = time.time() - start_t
@@ -334,7 +264,7 @@ class TermuxTrackerApp:
         table.add_row("Provedor Ativo", gps_data.get("provider", "N/A").upper())
         table.add_row("Coordenadas", f"{gps_data.get('latitude'):.7f}, {gps_data.get('longitude'):.7f}")
         table.add_row("Precisão (Erro)", f"{gps_data.get('accuracy', 0.0):.1f} metros")
-        table.add_row("Modo Segundo Plano", "ATIVADO (Wake-Lock OK)" if self.wake_lock_active else "INATIVO")
+        table.add_row("Daemon 24/7 em Segundo Plano", "ATIVADO (Independente)" if self.shell_daemon_active else "INATIVO")
 
         console.print(table)
         console.print("\n[dim]Pressione ENTER para voltar ao menu...[/dim]")
@@ -431,8 +361,6 @@ class TermuxTrackerApp:
                 break
 
     def main_menu(self):
-        self.start_background_tracker()
-
         while True:
             self.clear_screen()
             self.show_header()
@@ -440,16 +368,16 @@ class TermuxTrackerApp:
             name = self.current_user.get("name", self.current_user.get("username"))
             role = self.current_user.get("role", "user").upper()
 
-            status_str = "[bold green]ATIVADO (Rodando a cada 5s)[/bold green]" if self.tracking_active else "[bold red]DESATIVADO[/bold red]"
-            bg_str = " [green]⚡ Daemon 24/7 Ativo[/green]" if self.wake_lock_active else ""
+            status_str = "[bold green]ATIVADO (Daemon Shell 24/7)[/bold green]" if self.shell_daemon_active else "[bold red]DESATIVADO[/bold red]"
+            bg_str = " [bold green]⚡ Ininterrupto ON[/bold green]" if self.shell_daemon_active else ""
             
             console.print(f"Dispositivo: [bold cyan]{name}[/bold cyan] | Função: [bold magenta]{role}[/bold magenta]")
             console.print(f"Status do Rastreamento: {status_str}{bg_str}\n")
 
-            console.print("1. " + ("[bold red]PARAR Rastreamento em Segundo Plano[/bold red]" if self.tracking_active else "[bold green]INICIAR Rastreamento em Segundo Plano (Daemon 24/7)[/bold green]"))
+            console.print("1. " + ("[bold red]PARAR Rastreamento 24/7 em Segundo Plano[/bold red]" if self.shell_daemon_active else "[bold green]INICIAR Rastreamento 24/7 em Segundo Plano (Ininterrupto 5s)[/bold green]"))
             console.print("2. [cyan]Ver Minha Localização Exata & Telemetria[/cyan]")
             console.print("3. [yellow]Executar Teste de Diagnóstico de Hardware GPS[/yellow]")
-            console.print("4. [blue]🔋 Guia para Liberar Bateria do Android (Evitar parada do App)[/blue]")
+            console.print("4. [blue]🔋 Guia de Bateria Android (Manter Rastreio Ativo com Tela Apagada)[/blue]")
 
             if self.current_user.get("role") == "admin":
                 console.print("5. [bold magenta]Painel do Administrador (Gerenciar Usuários)[/bold magenta]")
@@ -463,10 +391,10 @@ class TermuxTrackerApp:
             choice = Prompt.ask("Escolha uma opção", choices=choices)
 
             if choice == "1":
-                if self.tracking_active:
-                    self.stop_background_daemon_process()
+                if self.shell_daemon_active:
+                    self.stop_shell_daemon_247()
                 else:
-                    self.start_background_daemon_process()
+                    self.start_shell_daemon_247()
             elif choice == "2":
                 self.display_current_location_panel()
             elif choice == "3":
@@ -483,7 +411,7 @@ class TermuxTrackerApp:
                 break
 
     def logout(self):
-        self.stop_background_daemon_process()
+        self.stop_shell_daemon_247()
         self.current_user = None
         console.print("[yellow]Sessão encerrada.[/yellow]")
         time.sleep(1)
@@ -502,6 +430,6 @@ if __name__ == "__main__":
     try:
         app.run()
     except KeyboardInterrupt:
-        app.stop_background_daemon_process()
+        app.stop_shell_daemon_247()
         console.print("\n[bold yellow]Aplicação interrompida pelo usuário.[/bold yellow]")
         sys.exit(0)
