@@ -8,8 +8,7 @@ from typing import Dict, Any, Tuple
 class LocationTracker:
     """
     Módulo de alta precisão GPS para Termux (Android).
-    Força a leitura do GPS do celular em 4 níveis (Satélite GPS -> Rede Wi-Fi -> Posição Auto -> Cache Passivo do Android).
-    Garante retorno imediato da localização exata do celular sem travar ou dar erro de inativo.
+    Executa capturas isoladas sem erros de socket IPC do Termux:API.
     """
     def __init__(self, use_termux_api: bool = True, mock_fallback: bool = False):
         self.use_termux_api = use_termux_api
@@ -19,11 +18,9 @@ class LocationTracker:
 
     def get_raw_gps(self) -> Dict[str, Any]:
         """
-        Obtém a localização real do dispositivo Android usando o Termux API.
-        Tenta em sequência: GPS por Satélite -> Rede/Wi-Fi -> Provedor Passivo/Última Posição do Android.
+        Obtém a localização real do dispositivo Android usando o Termux API de forma segura.
         """
         if self.use_termux_api:
-            # 4 Estratégias de captura do Android (em ordem de prioridade)
             strategies = [
                 (["termux-location", "-p", "gps", "-s", "once"], "gps_satelite", 5),
                 (["termux-location", "-p", "network", "-s", "once"], "rede_wifi_torres", 4),
@@ -35,11 +32,12 @@ class LocationTracker:
                 try:
                     result = subprocess.run(
                         cmd,
-                        capture_output=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL,
                         text=True,
                         timeout=timeout_sec
                     )
-                    if result.returncode == 0 and result.stdout.strip():
+                    if result.returncode == 0 and result.stdout and result.stdout.strip():
                         data = json.loads(result.stdout)
                         lat = float(data.get("latitude", 0.0))
                         lng = float(data.get("longitude", 0.0))
@@ -64,7 +62,6 @@ class LocationTracker:
                 except Exception:
                     continue
 
-        # Se tiver uma localização válida anterior capturada no celular, mantém
         if self.last_valid_location:
             loc = dict(self.last_valid_location)
             loc["status"] = "fix_anterior"
@@ -89,14 +86,11 @@ class LocationTracker:
             "altitude": 0.0,
             "speed": 0.0,
             "bearing": 0.0,
-            "provider": "aguardando_permissao_termux_api",
-            "status": "sem_permissao_ou_sinal"
+            "provider": "aguardando_sinal",
+            "status": "sem_sinal"
         }
 
     def reverse_geocode(self, lat: float, lng: float) -> Dict[str, str]:
-        """
-        Realiza geocodificação reversa de alta precisão (zoom=18).
-        """
         if lat == 0.0 and lng == 0.0:
             return {
                 "street": "Aguardando Leitura do GPS",
@@ -112,7 +106,7 @@ class LocationTracker:
             return self.last_known_address_cache[cache_key]
 
         headers = {
-            "User-Agent": "TermuxRastreadorGPS/4.0 (android-multi-provider)"
+            "User-Agent": "TermuxRastreadorGPS/5.0 (safe-ipc)"
         }
         url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lng}&zoom=18&addressdetails=1"
 
